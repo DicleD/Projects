@@ -1,0 +1,111 @@
+import datetime as dt
+import pandas as pd
+pd.set_option('display.max_columns', None)
+pd.set_option('display.float_format', lambda x: '%.3f' % x)
+
+# Data Preprocessing
+df_ = pd.read_excel("online_retail_II.xlsx", sheet_name="Year 2010-2011")
+df = df_.copy()
+df.head()
+
+def check_df(dataframe, head = 5):
+    print("##################### Shape #####################")
+    print(dataframe.shape)
+    print("##################### Types #####################")
+    print(dataframe.dtypes)
+    print("##################### Head #####################")
+    print(dataframe.head(head))
+    print("##################### Columns #####################")
+    print(dataframe.columns)
+    print("##################### NA #####################")
+    print(dataframe.isnull().sum())#soru3
+    print("##################### describe() #####################")
+    print(dataframe.describe().T)#soru2
+
+check_df(df)
+#
+df.dropna(inplace=True)
+#
+df["StockCode"].nunique()
+#
+df["StockCode"].value_counts()
+#
+#df.groupby("Invoice").agg({"StockCode": "count"}).sort_values(df.StockCode, ascending=False).head()
+df.groupby("Invoice")["StockCode"].count().sort_values(ascending=False).head()
+
+#
+df = df[~df.Invoice.str.contains("C", na=False)]
+
+#
+df["TotalPrice"] = df["Price"]*df["Quantity"]
+
+Calculating RFM metrics
+#1
+#recency
+df["InvoiceDate"].max()
+today_date = dt.datetime(2011, 12, 11)
+#monetary
+#frequency
+
+#2
+rfm = df.groupby("Customer ID").agg({"InvoiceDate": lambda date: (today_date - date.max()).days,
+                                    "Invoice": lambda invoice: invoice.nunique(),
+                                    "TotalPrice": lambda totalprice: totalprice.sum()})
+
+rfm.columns = ["recency", "frequency", "monetary"]
+rfm = rfm[rfm["monetary"]>0]
+
+#RFM scores
+
+rfm["recency_score"] = pd.qcut(rfm["recency"], 5, labels=[5,4,3,2,1])
+rfm["frequency_score"] = pd.qcut(rfm["frequency"].rank(method="first"), 5, labels=[1,2,3,4,5])
+"""rank(self, axis=0, method='average', numeric_only=None,
+             na_option='keep', ascending=True, pct=False):
+             method : {'average', 'min', 'max', 'first', 'dense'}
+            * average: average rank of group
+            * min: lowest rank in group
+            * max: highest rank in group
+            * first: ranks assigned in order they appear in the array
+            * dense: like 'min', but rank always increases by 1 between groups"""
+rfm["monetary_score"] = pd.qcut(rfm["monetary"], 5, labels=[1,2,3,4,5])
+
+rfm["rfm_score"] = rfm["recency_score"].astype(str)+rfm["frequency_score"].astype(str)+rfm["monetary_score"].astype(str)
+
+#RFM Segments
+seg_map = {
+    r'[1-2][1-2]': 'hibernating',
+    r'[1-2][3-4]': 'at_Risk',
+    r'[1-2]5': 'cant_loose',
+    r'3[1-2]': 'about_to_sleep',
+    r'33': 'need_attention',
+    r'[3-4][4-5]': 'loyal_customers',
+    r'41': 'promising',
+    r'51': 'new_customers',
+    r'[4-5][2-3]': 'potential_loyalists',
+    r'5[4-5]': 'champions'}
+
+rfm["segment"] = rfm["rfm_score"].replace(seg_map, regex=True)
+
+
+rfm["segment"].value_counts()
+"""hibernating           1071
+loyal_customers         819
+champions               633
+at_Risk                 593
+potential_loyalists     484
+about_to_sleep          352
+need_attention          187
+promising                94
+cant_loose               63
+new_customers            42"""
+
+rfm[["segment", "recency", "frequency", "monetary"]].groupby("segment").agg(["mean", "count"])
+rfm[rfm["segment"] == "need_attention"].describe().T
+rfm[rfm["segment"] == "loyal_customers"].describe().T
+rfm[rfm["segment"] == "champions"].describe().T
+
+new_df = pd.DataFrame()
+new_df["loyal_customers_id"] = rfm[rfm["segment"] == "loyal_customers"].index
+new_df.to_excel("loyal_customers.xlsx")
+
+
