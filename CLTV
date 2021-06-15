@@ -1,0 +1,205 @@
+import datetime as dt
+import pandas as pd
+#pip install lifetimes
+import matplotlib.pyplot as plt
+from lifetimes import BetaGeoFitter
+from lifetimes import GammaGammaFitter
+from lifetimes.plotting import plot_period_transactions
+
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', 500)
+pd.set_option('display.float_format', lambda x: '%.4f' % x)
+from sklearn.preprocessing import MinMaxScaler
+
+def outlier_thresholds(dataframe, variable):
+    quartile1 = dataframe[variable].quantile(0.01)
+    quartile3 = dataframe[variable].quantile(0.99)
+    interquantile_range = quartile3 - quartile1
+    up_limit = quartile3 + 1.5 * interquantile_range
+    low_limit = quartile1 - 1.5 * interquantile_range
+    return low_limit, up_limit
+
+
+def replace_with_thresholds(dataframe, variable):
+    low_limit, up_limit = outlier_thresholds(dataframe, variable)
+    dataframe.loc[(dataframe[variable] < low_limit), variable] = low_limit
+    dataframe.loc[(dataframe[variable] > up_limit), variable] = up_limit
+
+#pip install sqlalchemy
+
+from sqlalchemy import create_engine
+
+# credentials.
+creds = {'user': '',
+         'passwd': '',
+         'host': '',
+         'port': ,
+         'db': ''}
+
+# MySQL conection string.
+connstr = 'mysql+mysqlconnector://{user}:{passwd}@{host}:{port}/{db}'
+
+# sqlalchemy engine for MySQL connection
+conn = create_engine(connstr.format(**creds))
+
+pd.read_sql_query("show databases;", conn)
+pd.read_sql_query("show tables", conn)
+pd.read_sql_query("select * from online_retail_2010_2011 limit 10", conn)
+
+retail_mysql_df = pd.read_sql_query("select * from online_retail_2010_2011", conn)
+retail_mysql_df.head()
+retail_mysql_df.shape
+retail_mysql_df.info()
+df = retail_mysql_df.copy()
+
+#Data Preprocessing
+
+df.describe().T
+df.isnull().sum()
+df.dropna(inplace=True)
+df = df[~df.Invoice.str.contains("C", na=False)]
+#
+df = df[df.Price>1]
+df = df[df.Quantity>1]
+#
+replace_with_thresholds(df, "Quantity")
+replace_with_thresholds(df, "Price")
+
+df["TotalPrice"] = df["Price"] * df["Quantity"]
+df["InvoiceDate"].max()
+today_date = dt.datetime(2011, 12, 11)
+dfx = df.copy()
+
+cltv_df = df.groupby('Customer ID').agg({'InvoiceDate': lambda date: (date.max() - date.min()).days,
+                                         'Invoice': lambda num: num.nunique(),
+                                         'TotalPrice': lambda TotalPrice: TotalPrice.sum()})
+cltv_df.columns = ['recency', 'frequency', 'monetary']
+cltv_df["T"] = df.groupby("Customer ID").agg({"InvoiceDate": lambda date: (today_date - date.min()).days})
+#
+cltv_df["monetary"] = cltv_df["monetary"] / cltv_df["frequency"]
+#
+cltv_df = cltv_df[cltv_df["monetary"] > 0]
+#
+cltv_df = cltv_df[(cltv_df['frequency'] > 1)]
+
+# for BGNBD we need weekly values of tenure and recency
+cltv_df["recency"] = cltv_df["recency"] / 7
+cltv_df["T"] = cltv_df["T"] / 7
+###################
+# BG/NBD Model
+bgf = BetaGeoFitter(penalizer_coef=0.001)
+bgf.fit(cltv_df['frequency'],
+        cltv_df['recency'],
+        cltv_df['T'])
+# 6
+cltv_df["expected_purchase_6_month"] = bgf.predict(24,
+                                                   cltv_df['frequency'],
+                                                   cltv_df['recency'],
+                                                   cltv_df['T'])
+
+cltv_df.sort_values("expected_purchase_6_month", ascending=False).head(25)
+
+#######
+#GAMMA-GAMMA MODEL
+ggf = GammaGammaFitter(penalizer_coef=0.01)
+ggf.fit(cltv_df['frequency'], cltv_df['monetary'])
+
+cltv_df["expected_average_profit"] = ggf.conditional_expected_average_profit(cltv_df['frequency'],
+                                                                             cltv_df['monetary'])
+
+cltv_df.sort_values("expected_average_profit", ascending=False).head(20)
+
+#1 Calculation of CLTV for 6 months
+cltv = ggf.customer_lifetime_value(bgf,
+                                   cltv_df['frequency'],
+                                   cltv_df['recency'],
+                                   cltv_df['T'],
+                                   cltv_df['monetary'],
+                                   time=6,
+                                   freq="W",
+                                   discount_rate=0.01)
+
+
+cltv = cltv.reset_index()
+cltv.sort_values(by="clv", ascending=False).head(20)
+cltv_final = cltv_df.merge(cltv, on="Customer ID", how="left")
+cltv_final.sort_values(by="clv", ascending=False).head(25)
+
+"""Customer ID  recency  frequency  monetary       T  expected_purchase_6_month  expected_average_profit        clv
+1094   14646.0000  50.4286         67 3394.5121 50.7143                    25.8866                3402.9943 92315.2121
+2690   18102.0000  52.2857         60 3661.9963 52.5714                    22.6099                3672.2125 87010.8851
+2397   17450.0000  51.2857         45 2743.3902 52.5714                    17.0992                2753.6253 49343.0512
+35     12415.0000  44.7143         19 5629.3263 48.2857                     8.1187                5679.1112 48314.6881
+850    14156.0000  45.5714         53 1986.4896 47.1429                    21.7331                1992.7982 45383.2536"""
+#2
+#CLTV analysis for 1 month
+cltv_1 = ggf.customer_lifetime_value(bgf,
+                                   cltv_df['frequency'],
+                                   cltv_df['recency'],
+                                   cltv_df['T'],
+                                   cltv_df['monetary'],
+                                   time=1,
+                                   freq="W",
+                                   discount_rate=0.01)
+cltv_1_final = cltv_df.merge(cltv_1, on="Customer ID", how="left")
+cltv_final.sort_values(by="clv", ascending=False).head(10)
+"""Customer ID  recency  frequency  monetary       T  expected_purchase_6_month  expected_average_profit        clv
+   14646.0000  50.4286         67 3394.5121 50.7143                    25.8866                3402.9943 92315.2121
+   18102.0000  52.2857         60 3661.9963 52.5714                    22.6099                3672.2125 87010.8851
+   17450.0000  51.2857         45 2743.3902 52.5714                    17.0992                2753.6253 49343.0512
+   12415.0000  44.7143         19 5629.3263 48.2857                     8.1187                5679.1112 48314.6881
+   14156.0000  45.5714         53 1986.4896 47.1429                    21.7331                1992.7982 45383.2536
+   14911.0000  53.1429        197  589.9556 53.4286                    71.5134                 590.4719 44253.0848
+   14096.0000  13.8571         17 2324.3294 14.5714                    16.4499                2347.4585 40423.7803
+   17511.0000  52.8571         30 2587.8193 53.4286                    11.5370                2602.3353 31463.2320
+   14088.0000  44.5714         13 3839.9746 46.1429                     6.0831                3889.9042 24794.2832
+   16684.0000  50.4286         23 2329.3391 51.2857                     9.3171                2346.4271 22909.6376
+"""
+
+#12 months
+cltv_12 = ggf.customer_lifetime_value(bgf,
+                                   cltv_df['frequency'],
+                                   cltv_df['recency'],
+                                   cltv_df['T'],
+                                   cltv_df['monetary'],
+                                   time=12,
+                                   freq="W",
+                                   discount_rate=0.01)
+cltv_12_final = cltv_df.merge(cltv_12, on="Customer ID", how="left")
+cltv_final.sort_values(by="clv", ascending=False).head(10)
+"""ilk 10'daki müşteriler 1 aylık ve 12 aylık değerler için değişmemiştir"""
+
+# segmentation (6 months)
+cltv = ggf.customer_lifetime_value(bgf,
+                                   cltv_df['frequency'],
+                                   cltv_df['recency'],
+                                   cltv_df['T'],
+                                   cltv_df['monetary'],
+                                   time=6,
+                                   freq="W", #{"D", "H", "M", "W"} for day, hour, month, week. This represents what unit of time your T is measure in.
+                                   discount_rate=0.01)
+cltv_final = cltv_df.merge(cltv, on="Customer ID", how="left")
+
+cltv_final["segment"] = pd.qcut(cltv_final.clv, 4, labels=["D", "C", "B", "A"])
+cltv_final.groupby("segment")["clv"].describe().T
+"""
+segment        D        C         B          A
+count   694.0000 693.0000  693.0000   694.0000
+mean    217.5879 589.9336 1101.8938  3774.7518
+std     112.9932 112.9591  193.3266  6582.4041
+min       0.0000 402.5917  799.3000  1490.6288
+25%     126.1107 491.7788  930.2951  1819.4271
+50%     222.8925 588.0188 1078.6135  2303.7817
+75%     315.2322 682.4058 1257.6960  3333.6283
+max     402.5637 799.0499 1490.5491 92315.2121
+
+"""
+
+cltv_final = cltv_final.reset_index()
+cltv_final["Customer ID"] = cltv_final["Customer ID"].astype(int)
+
+cltv_final.to_sql(name='dicle_dogan', con=conn, if_exists='replace', index=False)
+
+
+
+
